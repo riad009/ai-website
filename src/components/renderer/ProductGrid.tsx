@@ -57,6 +57,7 @@ export default function ProductGridRenderer({ content, theme, editMode, onUpdate
                 image: product.image,
                 badge: product.badge,
                 description: product.description,
+                quantity: 1,
             });
             store.setProductDetailOpen(true);
         }

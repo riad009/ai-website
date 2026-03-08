@@ -12,26 +12,33 @@ interface ChatMessage {
 
 interface ComponentLibraryProps {
   onAdd: (type: string) => void;
+  projectId?: string;
+  userId?: string;
 }
 
-const SESSION_KEY = "ai-chat-messages";
+function getSessionKey(projectId?: string, userId?: string) {
+  if (projectId && userId) return `ai-chat-${userId}-${projectId}`;
+  if (projectId) return `ai-chat-project-${projectId}`;
+  return "ai-chat-messages";
+}
 
-function loadMessages(): ChatMessage[] {
+function loadMessages(key: string): ChatMessage[] {
   try {
-    const stored = sessionStorage.getItem(SESSION_KEY);
+    const stored = sessionStorage.getItem(key);
     return stored ? JSON.parse(stored) : [];
   } catch {
     return [];
   }
 }
 
-function saveMessages(msgs: ChatMessage[]) {
+function saveMessages(key: string, msgs: ChatMessage[]) {
   try {
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(msgs));
+    sessionStorage.setItem(key, JSON.stringify(msgs));
   } catch { }
 }
 
-export default function ComponentLibrary({ onAdd }: ComponentLibraryProps) {
+export default function ComponentLibrary({ onAdd, projectId, userId }: ComponentLibraryProps) {
+  const sessionKey = getSessionKey(projectId, userId);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
@@ -42,17 +49,17 @@ export default function ComponentLibrary({ onAdd }: ComponentLibraryProps) {
 
   const { replaceAllComponents, components, selectedComponentIds, clearSelection, selectedMicroElement, setMicroElement } = useEditorStore();
 
-  // Load messages from sessionStorage on mount
+  // Load messages from sessionStorage on mount or when project/user changes
   useEffect(() => {
-    setMessages(loadMessages());
+    setMessages(loadMessages(sessionKey));
     setMounted(true);
-  }, []);
+  }, [sessionKey]);
 
   // Save messages to sessionStorage and scroll on change
   useEffect(() => {
-    if (mounted) saveMessages(messages);
+    if (mounted) saveMessages(sessionKey, messages);
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, mounted]);
+  }, [messages, mounted, sessionKey]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -99,7 +106,7 @@ export default function ComponentLibrary({ onAdd }: ComponentLibraryProps) {
   };
 
   const buildHistory = (): Array<{ role: "user" | "assistant"; content: string }> =>
-    messages.slice(-6).map((m) => ({ role: m.role, content: m.content }));
+    messages.slice(-2).map((m) => ({ role: m.role, content: m.content }));
 
   const sendMessage = async () => {
     const trimmed = input.trim();
@@ -173,6 +180,8 @@ export default function ComponentLibrary({ onAdd }: ComponentLibraryProps) {
         } else {
           addAssistantMessage("No sections returned. Please try a different description.");
         }
+        // Refresh token count in sidebar
+        window.dispatchEvent(new Event("tokens-updated"));
       } else {
         const res = await fetch("/api/ai/chat-session", {
           method: "POST",
@@ -193,6 +202,8 @@ export default function ComponentLibrary({ onAdd }: ComponentLibraryProps) {
         const data = await res.json();
         if (data.website) applyWebsiteJson(data.website);
         addAssistantMessage(data.message || "Done! Website updated.");
+        // Refresh token count in sidebar
+        window.dispatchEvent(new Event("tokens-updated"));
       }
     } catch {
       addAssistantMessage("Network error. Please check your connection.");
@@ -209,7 +220,7 @@ export default function ComponentLibrary({ onAdd }: ComponentLibraryProps) {
 
   const clearChat = () => {
     setMessages([]);
-    saveMessages([]);
+    saveMessages(sessionKey, []);
   };
 
   return (

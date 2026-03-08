@@ -161,7 +161,7 @@ export default function EditorPage() {
       <div className="editor-body">
         {showLibrary && (
           <aside className="editor-sidebar-left">
-            <ComponentLibrary onAdd={(type) => addComponent(type)} />
+            <ComponentLibrary onAdd={(type) => addComponent(type)} projectId={projectId} userId={session?.user?.id} />
           </aside>
         )}
 
