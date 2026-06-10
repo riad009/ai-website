@@ -46,3 +46,6 @@ next-env.d.ts
 /.published-sites/
 
 .vercel
+
+# Claude Code local settings
+.claude/
