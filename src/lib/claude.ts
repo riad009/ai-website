@@ -18,7 +18,8 @@ async function callClaude(
     systemPrompt: string | undefined,
     messages: Array<{ role: "user" | "assistant"; content: string }>,
     maxTokens: number = 8192,
-    model: string = DEFAULT_MODEL
+    model: string = DEFAULT_MODEL,
+    thinking: boolean = false
 ) {
     const body: Record<string, unknown> = {
         model,
@@ -30,9 +31,9 @@ async function callClaude(
         body.system = systemPrompt;
     }
 
-    // Adaptive thinking lets the model reason about layout/design before writing,
-    // which meaningfully improves and diversifies the output.
-    if (supportsThinking(model)) {
+    // Adaptive thinking improves quality but adds latency. Off by default for the
+    // short structured calls (plan, per-section) so each stays well under 60s.
+    if (thinking && supportsThinking(model)) {
         body.thinking = { type: "adaptive" };
     }
 
@@ -552,6 +553,131 @@ CONTENT RULES:
 - Image seeds must be relevant to the content (seed name should describe the image subject)`;
 
 
+
+// ═══════════════════════════════════════════
+// ASYNC GENERATION — plan + per-section
+// ═══════════════════════════════════════════
+// Generating a whole site in one request takes ~120s, which exceeds Vercel's
+// 60s serverless limit. Instead we split it: one fast "plan" call returns the
+// metadata + section list, then the client generates each section in its own
+// short request. Every request stays well under 60s.
+
+export interface SitePlan {
+    siteName: string;
+    category: string;
+    theme: {
+        primaryColor: string;
+        secondaryColor: string;
+        accentColor: string;
+        backgroundColor: string;
+        textColor: string;
+        fontFamily: string;
+    };
+    sections: { id: string; label: string }[];
+    brief: string; // condensed design+content brief passed to each section call
+}
+
+const PLAN_SYSTEM_PROMPT = `You are an elite website designer. Plan a website's structure and visual identity. Output ONLY valid JSON (no markdown, no code fences) in EXACTLY this shape:
+
+{
+  "siteName": "Creative Brand Name",
+  "category": "business|portfolio|restaurant|local-service|event|basic-store",
+  "theme": {
+    "primaryColor": "#hex",
+    "secondaryColor": "#hex",
+    "accentColor": "#hex",
+    "backgroundColor": "#hex",
+    "textColor": "#hex",
+    "fontFamily": "Inter|Outfit|DM Sans|Playfair Display|Space Grotesk|Sora|Crimson Pro|Raleway|Poppins|Montserrat"
+  },
+  "sections": [
+    { "id": "nav-1", "label": "Navigation" },
+    { "id": "hero-1", "label": "Hero" },
+    { "id": "features-1", "label": "Features" },
+    { "id": "footer-1", "label": "Footer" }
+  ],
+  "brief": "A 2-4 sentence shared style+content brief: the chosen aesthetic, exact palette, fonts, mood, and key facts about the business. Every section will be built to match this brief."
+}
+
+RULES:
+- Choose a CREATIVE siteName specific to the user's prompt.
+- If the user provided a DESIGN DIRECTION, the theme + brief MUST match it precisely (style, color mood, personality). Otherwise pick a bold, distinctive aesthetic — never a generic indigo-on-white default.
+- 6-9 sections. ALWAYS include navigation first and footer last. Use varied ids like nav-1, hero-1, features-1, about-1, services-1, testimonials-1, pricing-1, gallery-1, contact-1, cta-1, footer-1.
+- The "brief" is critical: it is the ONLY shared context each section build receives, so pack in the palette (with hex), fonts, mood, and the most important business facts.
+- Output ONLY the JSON object.`;
+
+function sectionSystemPrompt(plan: SitePlan): string {
+    return `You are an elite website designer building ONE section of a larger website. Output ONLY the raw HTML for this single section — no JSON, no markdown, no code fences, no explanation.
+
+SHARED SITE CONTEXT (every section must match this exactly):
+- Site name: ${plan.siteName}
+- Category: ${plan.category}
+- Theme: ${JSON.stringify(plan.theme)}
+- Design & content brief: ${plan.brief}
+
+OUTPUT FORMAT:
+Return a single complete, self-contained HTML block for this section with ALL styles inline (style="..."). If this is the FIRST section (navigation), begin with a <style> tag containing a Google Fonts @import for the theme fonts and CSS @keyframes (fadeInUp, fadeInLeft, fadeInRight, float, scaleIn, shimmer, pulseGlow, gradientShift), then the <nav>.
+
+DESIGN REQUIREMENTS (mandatory):
+- Make it look like a $50k agency website — premium, modern, unique. NOT a template.
+- Use the exact theme colors above. Use CSS variables where helpful: var(--primary), var(--secondary), var(--accent), var(--bg), var(--text).
+- Use REAL images from picsum.photos: https://picsum.photos/seed/{unique-keyword}/{w}/{h} with relevant, UNIQUE seed keywords. Always include alt text and object-fit:cover.
+- Modern CSS: flexbox/grid, gradients, glassmorphism (backdrop-filter), large soft shadows, border-radius, smooth hover transitions, entrance animations on elements.
+- Generous spacing (vary 80-140px section padding), strong typographic hierarchy.
+- ALL text must be high-contrast and readable against its background (dark text on light bg, light text on dark bg). Never light/pastel text on light backgrounds.
+- ALL content must be SPECIFIC to this business — realistic names, prices, stats, copy. No generic filler.
+- Buttons: <a href="#" style="...">. Forms: <form onsubmit="event.preventDefault()">.
+- Decorative absolute-positioned elements must have pointer-events:none.`;
+}
+
+export async function planWebsite(
+    prompt: string,
+    category: string,
+    answers?: Record<string, string>,
+    model?: string,
+    designBrief?: string
+): Promise<SitePlan> {
+    const userMessage = buildGenerationMessage(prompt, category, answers, designBrief);
+    const text = await callClaude(
+        PLAN_SYSTEM_PROMPT,
+        [{ role: "user", content: userMessage }],
+        2048,
+        model || DEFAULT_MODEL
+    );
+    const plan = JSON.parse(cleanJson(text));
+    if (!plan.sections || !Array.isArray(plan.sections) || plan.sections.length === 0) {
+        throw new Error("Plan returned no sections");
+    }
+    return plan as SitePlan;
+}
+
+export async function generateSection(
+    plan: SitePlan,
+    section: { id: string; label: string },
+    model?: string
+): Promise<{ id: string; type: "custom"; content: { html: string; sectionLabel: string } }> {
+    const isFirst = plan.sections[0]?.id === section.id;
+    const text = await callClaude(
+        sectionSystemPrompt(plan),
+        [{
+            role: "user",
+            content: `Build the "${section.label}" section (id: ${section.id})${isFirst ? " — this is the FIRST section, include the <style> tag with fonts and keyframes before the nav" : ""}. Output ONLY the HTML.`,
+        }],
+        4096,
+        model || DEFAULT_MODEL
+    );
+
+    // Strip any stray code fences or section markers the model might add.
+    let html = text.trim();
+    html = html.replace(/^```html?\s*/i, "").replace(/```\s*$/i, "").trim();
+    html = html.replace(/^={3,}\s*SECTION:[^=]*={3,}\s*/i, "").replace(/={3,}\s*END_SECTION\s*={3,}\s*$/i, "").trim();
+
+    return {
+        id: section.id,
+        type: "custom" as const,
+        content: { html, sectionLabel: section.label },
+    };
+}
 
 function parseWebsiteResponse(text: string): any {
     // Extract JSON metadata — handle whitespace variations around markers

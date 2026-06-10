@@ -234,7 +234,7 @@ export default function DashboardPage() {
         setGenerating(true);
 
         try {
-            let content = {};
+            let content: Record<string, unknown> = {};
 
             if (newPrompt.trim()) {
                 // Build answers map for the API (only non-empty answers)
@@ -248,15 +248,17 @@ export default function DashboardPage() {
                 // Reset progress state
                 setGenerationStep(0);
                 setGenerationPercent(5);
-                setGenerationDetail("Starting...");
+                setGenerationDetail("Planning your website...");
                 lastStepRef.current = -1;
                 setGenerationMessages([
                     { role: "user", text: newPrompt.trim() },
                     { role: "ai", text: `Got it! I'll create a ${newCategory !== 'auto' ? newCategory + ' ' : ''}website based on your description. Let me get started... 🎨` },
                 ]);
 
-                // Use streaming endpoint for real progress
-                const aiRes = await fetch("/api/ai/generate-stream", {
+                // Phase 1: plan the site (metadata + section list). One short request.
+                setGenerationStep(1);
+                setGenerationPercent(10);
+                const planRes = await fetch("/api/ai/plan", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -268,57 +270,64 @@ export default function DashboardPage() {
                     }),
                 });
 
-                if (!aiRes.ok) {
-                    let errMsg = "AI generation failed";
-                    try { const e = await aiRes.json(); errMsg = e.error || errMsg; } catch { }
+                if (!planRes.ok) {
+                    let errMsg = "AI planning failed";
+                    try { const e = await planRes.json(); errMsg = e.error || errMsg; } catch { }
                     alert(errMsg);
                     setGenerating(false);
                     return;
                 }
 
-                // Read SSE stream
-                const reader = aiRes.body?.getReader();
-                if (!reader) { alert("Streaming not supported"); setGenerating(false); return; }
-
-                const decoder = new TextDecoder();
-                let sseBuffer = "";
-                let streamError: string | null = null;
-
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-
-                    sseBuffer += decoder.decode(value, { stream: true });
-                    const lines = sseBuffer.split("\n");
-                    sseBuffer = lines.pop() || "";
-
-                    for (const line of lines) {
-                        if (!line.startsWith("data: ")) continue;
-                        try {
-                            const event = JSON.parse(line.slice(6));
-                            if (event.type === "progress") {
-                                setGenerationStep(event.step);
-                                setGenerationPercent(event.percent);
-                                setGenerationDetail(event.detail);
-                            } else if (event.type === "complete") {
-                                content = event.website;
-                                setGenerationStep(GENERATION_STEPS.length - 1);
-                                setGenerationPercent(100);
-                                setGenerationDetail("Done!");
-                            } else if (event.type === "error") {
-                                streamError = event.error;
-                            }
-                        } catch { }
-                    }
-                }
-
-                if (streamError) {
-                    alert(streamError);
+                const { plan } = await planRes.json();
+                if (!plan?.sections?.length) {
+                    alert("AI generation failed — no website plan received");
                     setGenerating(false);
                     return;
                 }
 
-                if (!content || Object.keys(content).length === 0) {
+                setGenerationStep(2);
+                setGenerationPercent(20);
+                setGenerationDetail(`Designed "${plan.siteName}" — building ${plan.sections.length} sections...`);
+                setGenerationMessages(prev => [...prev, { role: "ai", text: `Designed the layout for "${plan.siteName}" with ${plan.sections.length} sections. Now building each one... 🛠️` }]);
+
+                // Phase 2: build each section in its own short request (stays under 60s each).
+                const builtSections: unknown[] = [];
+                for (let i = 0; i < plan.sections.length; i++) {
+                    const sec = plan.sections[i];
+                    setGenerationStep(3);
+                    setGenerationDetail(`Building "${sec.label}" (${i + 1}/${plan.sections.length})...`);
+                    setGenerationPercent(20 + Math.round((i / plan.sections.length) * 70));
+
+                    const secRes = await fetch("/api/ai/section", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ plan, section: sec, model: selectedModel }),
+                    });
+
+                    if (!secRes.ok) {
+                        let errMsg = `Failed building "${sec.label}"`;
+                        try { const e = await secRes.json(); errMsg = e.error || errMsg; } catch { }
+                        alert(errMsg);
+                        setGenerating(false);
+                        return;
+                    }
+
+                    const { section: built } = await secRes.json();
+                    builtSections.push(built);
+                }
+
+                content = {
+                    siteName: plan.siteName,
+                    category: plan.category,
+                    theme: plan.theme,
+                    sections: builtSections,
+                };
+
+                setGenerationStep(GENERATION_STEPS.length - 1);
+                setGenerationPercent(100);
+                setGenerationDetail("Done!");
+
+                if (!content || (content.sections as unknown[]).length === 0) {
                     alert("AI generation failed — no website data received");
                     setGenerating(false);
                     return;
