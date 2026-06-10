@@ -4,14 +4,17 @@ const DEFAULT_MODEL = "claude-opus-4-8";
 
 export const AVAILABLE_MODELS = [
     { id: "claude-opus-4-8", label: "Claude Opus 4.8", description: "Most capable — best design" },
+    { id: "claude-opus-4-6", label: "Claude Opus 4.6", description: "Capable — older Opus" },
     { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", description: "Fast & powerful" },
     { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", description: "Fastest & cheapest" },
 ];
 
-// Opus 4.8 / Sonnet 4.6 support adaptive thinking, which produces more
-// thoughtful, less templated design output. Haiku 4.5 does not support it.
+// Opus 4.8 / Opus 4.6 / Sonnet 4.6 support adaptive thinking, which produces
+// more thoughtful, less templated design output. Haiku 4.5 does not.
 function supportsThinking(model: string): boolean {
-    return model.startsWith("claude-opus-4-8") || model.startsWith("claude-sonnet-4-6");
+    return model.startsWith("claude-opus-4-8")
+        || model.startsWith("claude-opus-4-6")
+        || model.startsWith("claude-sonnet-4-6");
 }
 
 async function callClaude(

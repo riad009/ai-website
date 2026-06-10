@@ -8,6 +8,7 @@ import { CATEGORIES } from "@/lib/schemas";
 
 const AVAILABLE_MODELS = [
     { id: "claude-opus-4-8", label: "Claude Opus 4.8", description: "Most capable — best design", icon: "🧠" },
+    { id: "claude-opus-4-6", label: "Claude Opus 4.6", description: "Capable — older Opus", icon: "🎯" },
     { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", description: "Fast & powerful", icon: "⚡" },
     { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", description: "Fastest & cheapest", icon: "🚀" },
 ];
