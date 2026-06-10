@@ -22,7 +22,8 @@ async function callClaude(
     messages: Array<{ role: "user" | "assistant"; content: string }>,
     maxTokens: number = 8192,
     model: string = DEFAULT_MODEL,
-    thinking: boolean = false
+    thinking: boolean = false,
+    outputSchema?: Record<string, unknown>
 ) {
     const body: Record<string, unknown> = {
         model,
@@ -38,6 +39,12 @@ async function callClaude(
     // short structured calls (plan, per-section) so each stays well under 60s.
     if (thinking && supportsThinking(model)) {
         body.thinking = { type: "adaptive" };
+    }
+
+    // Structured outputs guarantee the response is valid JSON matching the schema —
+    // essential for the plan call, which must JSON.parse cleanly every time.
+    if (outputSchema) {
+        body.output_config = { format: { type: "json_schema", schema: outputSchema } };
     }
 
     const res = await fetch(`${API_BASE}/messages`, {
@@ -218,9 +225,9 @@ async function callClaudeStream(
     return fullText;
 }
 
-// Builds the user message for website generation, folding in the user's answers
-// and design choices so the AI produces a site tailored to those exact picks.
-function buildGenerationMessage(
+// Shared content context: the topic, the user's answers, and the design brief —
+// WITHOUT any output-format instructions (those differ per caller).
+function buildContentContext(
     prompt: string,
     category: string,
     answers?: Record<string, string>,
@@ -244,7 +251,18 @@ function buildGenerationMessage(
         ? `Create a website for: "${enrichedPrompt}"`
         : `Create a ${category} website for: "${enrichedPrompt}"`;
 
-    return `${intro}${designSection}
+    return `${intro}${designSection}`;
+}
+
+// Builds the user message for the OLD single-shot generation (===JSON_START=== format).
+function buildGenerationMessage(
+    prompt: string,
+    category: string,
+    answers?: Record<string, string>,
+    designBrief?: string
+): string {
+    const isAuto = !category || category === "auto";
+    return `${buildContentContext(prompt, category, answers, designBrief)}
 
 IMPORTANT:
 ${isAuto ? "- Determine the best category for this website\n" : ""}- Design completely UNIQUE, modern HTML/CSS for every section — this MUST look like a $50k agency website, not a template
@@ -254,6 +272,25 @@ ${isAuto ? "- Determine the best category for this website\n" : ""}- Design comp
 - Use modern UI/UX: generous spacing, strong typographic hierarchy, depth/layering, smooth hover and entrance animations
 - Write all content specifically about this exact topic — no generic filler
 - Follow the ===JSON_START=== / ===SECTION=== output format exactly`;
+}
+
+// Builds the user message for the PLAN call. The plan system prompt dictates the
+// JSON output shape, so this message must NOT mention the ===JSON_START=== format
+// (that would make the model emit section HTML instead of the plan JSON).
+function buildPlanMessage(
+    prompt: string,
+    category: string,
+    answers?: Record<string, string>,
+    designBrief?: string
+): string {
+    const isAuto = !category || category === "auto";
+    return `${buildContentContext(prompt, category, answers, designBrief)}
+
+Plan this website:
+${isAuto ? "- Determine the best category for it\n" : ""}- Choose a creative brand name and a distinctive theme (colors + fonts) that match the design direction above (or, if none given, a bold non-generic aesthetic)
+- Decide the list of sections (6-9), navigation first and footer last
+- Write the shared "brief" so each section can be built consistently
+- Respond with ONLY the JSON object described in your instructions — no markdown, no code fences, no ===markers===.`;
 }
 
 export async function generateWebsiteStream(
@@ -580,6 +617,44 @@ export interface SitePlan {
     brief: string; // condensed design+content brief passed to each section call
 }
 
+// JSON schema for structured outputs — guarantees the plan response is valid JSON.
+// All objects need additionalProperties:false; no string length constraints allowed.
+const PLAN_SCHEMA: Record<string, unknown> = {
+    type: "object",
+    additionalProperties: false,
+    required: ["siteName", "category", "theme", "sections", "brief"],
+    properties: {
+        siteName: { type: "string" },
+        category: { type: "string" },
+        theme: {
+            type: "object",
+            additionalProperties: false,
+            required: ["primaryColor", "secondaryColor", "accentColor", "backgroundColor", "textColor", "fontFamily"],
+            properties: {
+                primaryColor: { type: "string" },
+                secondaryColor: { type: "string" },
+                accentColor: { type: "string" },
+                backgroundColor: { type: "string" },
+                textColor: { type: "string" },
+                fontFamily: { type: "string" },
+            },
+        },
+        sections: {
+            type: "array",
+            items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["id", "label"],
+                properties: {
+                    id: { type: "string" },
+                    label: { type: "string" },
+                },
+            },
+        },
+        brief: { type: "string" },
+    },
+};
+
 const PLAN_SYSTEM_PROMPT = `You are an elite website designer. Plan a website's structure and visual identity. Output ONLY valid JSON (no markdown, no code fences) in EXACTLY this shape:
 
 {
@@ -640,14 +715,29 @@ export async function planWebsite(
     model?: string,
     designBrief?: string
 ): Promise<SitePlan> {
-    const userMessage = buildGenerationMessage(prompt, category, answers, designBrief);
+    const userMessage = buildPlanMessage(prompt, category, answers, designBrief);
     const text = await callClaude(
         PLAN_SYSTEM_PROMPT,
         [{ role: "user", content: userMessage }],
         2048,
-        model || DEFAULT_MODEL
+        model || DEFAULT_MODEL,
+        false,
+        PLAN_SCHEMA
     );
-    const plan = JSON.parse(cleanJson(text));
+    // Be tolerant of stray preamble/fences: extract the outermost JSON object.
+    let jsonText = cleanJson(text);
+    if (!jsonText.startsWith("{")) {
+        const first = jsonText.indexOf("{");
+        const last = jsonText.lastIndexOf("}");
+        if (first !== -1 && last > first) jsonText = jsonText.slice(first, last + 1);
+    }
+    let plan: SitePlan;
+    try {
+        plan = JSON.parse(jsonText);
+    } catch {
+        console.error("Plan parse failed. First 300 chars:", text.slice(0, 300));
+        throw new Error("Plan response was not valid JSON");
+    }
     if (!plan.sections || !Array.isArray(plan.sections) || plan.sections.length === 0) {
         throw new Error("Plan returned no sections");
     }
