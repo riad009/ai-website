@@ -9,7 +9,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const { prompt, category, answers } = await req.json();
+    const { prompt, category, answers, model, designBrief } = await req.json();
 
     if (!prompt) {
         return NextResponse.json({ error: "Prompt is required" }, { status: 400 });
@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
     }
 
     try {
-        const website = await generateWebsite(prompt, resolvedCategory, answers);
+        const website = await generateWebsite(prompt, resolvedCategory, answers, model, designBrief);
         return NextResponse.json({ website, tokensRemaining: remaining });
 
     } catch (error) {
